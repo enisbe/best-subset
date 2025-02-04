@@ -1,0 +1,25 @@
+# Ignore everything in the sandbox directory
+sandbox/*
+
+# Except for Jupyter Notebook files
+!sandbox/*.ipynb
+
+
+# Ignore Jupyter Notebook checkpoints
+sandbox/.ipynb_checkpoints/
+
+# Ignore Python cache files
+sandbox/__pycache__/
+__pycache__/
+# Standard gitignore files and folders
+!.gitignore
+!.gitattributes
+!.git/
+
+.ipynb_checkpoints/* 
+*.py[cod]
+
+
+# Ignore .idea and egg-info folders
+.idea/
+best_subset.egg-info/
