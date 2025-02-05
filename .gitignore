@@ -7,7 +7,7 @@ sandbox/*
 
 # Ignore Jupyter Notebook checkpoints
 sandbox/.ipynb_checkpoints/
-
+best_subset/.ipynb_checkpoints/
 # Ignore Python cache files
 sandbox/__pycache__/
 __pycache__/
