@@ -254,3 +254,6 @@ class OrderLogit():
             self.convergence_status = 0 # converged successfully    
         self.predict_proba = pd.DataFrame(self.y_expected)
         self.predict_proba.columns = predict_name
+
+
+        
