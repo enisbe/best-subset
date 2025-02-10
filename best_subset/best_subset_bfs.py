@@ -2,28 +2,17 @@ import heapq
 import numpy as np
 import pandas as pd
 import collections
-import itertools 
+import itertools
+import warnings
+import fnmatch
 
-def loglike(params, X, y):
-    q = 2 * y - 1
-    X = X
-    return np.sum(np.log(cdf(q * np.dot(X, params))))
+from .model.logit  import LogisticRegression
+from .model.order_logit import OrderLogit
+from .model.ols import LinearRegression
 
-def cdf(X):
-    X = np.asarray(X)
-    return 1 / (1 + np.exp(-X))
 
-def I(params, X):
-    X = np.array(X)
-    L = cdf(np.dot(X, params))
-    return -np.dot(L * (1 - L) * X.T, X)
 
-def score(params, X, y):
-    y = y
-    X = X
-    L = cdf(np.dot(X, params))
-    return np.dot(y - L, X)
-
+ 
 def return_top(scores, varN, models, nbest=100):
     varN = np.array(varN)
     scores = np.array(scores)
@@ -42,30 +31,42 @@ def return_top(scores, varN, models, nbest=100):
 
     return scores_top, varN_top, models_top
 
+ 
 
 
-def best_subset_exhaustive_logistic(X, y, candidates):
-    avg = np.mean(y)
+
+def best_subset_exhaustive(X, y, candidates, weights=None, method='logistic'):
+    
+    if method.lower() == "ordinal" and weights is not None:
+        raise ValueError("Weights are not supported for ordinal regression")
+    
+    if weights is None:
+        weights = np.ones_like(y)
+
+    
+ 
     candidates = candidates[:]
+ 
 
-    if "const" not in X.columns.tolist():
-        raise NameError("const is missing in X")
+    if weights is None: 
+        weights = np.ones_like(y)
 
-    if "const" not in candidates:
-        candidates = ["const"] + candidates
-    else:
-        candidates.remove("const")
-        candidates = ["const"] + candidates
+    if method not in ["logistic", "ordinal", "ols"]:
+        raise ValueError("Method must be one of 'logistic', 'ordinal', or 'ols'")
+    
+    if method == "logistic" or method is None:
+        g, Is, const, candidates = logistic_null_model(y, X, candidates, weights)
+    elif method == "ordinal":
+        g, Is, const, candidates = ordinal_null_model(y, X, candidates)
+    elif method == "ols":   
+        g, Is, const, candidates = ols_null_model(y, X, candidates, weights)
 
-    X = X[candidates]
-
-    null_model = np.log(avg / (1 - avg))
-    C = candidates[1:]
-    theta_0 = np.append(null_model, np.zeros(X.shape[1] - 1))
-    g = score(theta_0, X, y)
-    Is = I(theta_0, X)
-
-    var_nums = list(range(1, len(candidates[1:]) + 1))
+ 
+    
+ 
+    C = candidates[len(const):]
+   
+    var_nums = list(range(1, len(C) + 1))
     varN = []
     models = []
     scores = []
@@ -76,10 +77,10 @@ def best_subset_exhaustive_logistic(X, y, candidates):
             temp_model = list(model)
             var = len(model)
             varN.append(var)
-
-            temp_model.insert(0, "const")
+ 
+            temp_model = const + temp_model
             loc = np.nonzero(np.in1d(candidates, temp_model))[0]
-            model_string = " ".join(temp_model[1:])
+            model_string = " ".join(temp_model[len(const):])
 
             models.append(model_string)
 
@@ -99,28 +100,88 @@ def best_subset_exhaustive_logistic(X, y, candidates):
     return results_exhaustive
 
 
+def logistic_null_model(y , X, candidates, weights):
 
-def prepare_step(X, y, candidates, rename=False):
-    duplicates = [item for item, count in collections.Counter(candidates).items() if count > 1]
-    candidates = list(dict.fromkeys(candidates))
-    X = X.copy()
-
-    if y.name in X.columns.tolist():
-        X.drop(y.name, axis=1, inplace=True)
-    
-    if "const" not  in X.columns.tolist():
-        raise NameError("const is missing in X")
-    
+    if 'const' not in X.columns.tolist():
+        X.insert(0, "const", 1) 
     else:
         X.drop("const", axis=1, inplace=True)
         X.insert(0, "const", 1)
+
+    if "const" not in candidates:
+        candidates = ["const"] + candidates
+    else:
+        candidates.remove("const")
+        candidates = ["const"] + candidates
+ 
+
+    X = np.asarray(X[candidates])
+   
+    avg = np.sum(weights*y) / np.sum(weights)    
+   
+    null_model = np.log(avg / (1 - avg))      
+   
+    theta_0 = np.append(null_model, np.zeros(len(candidates)-1))
+ 
+    g = LogisticRegression.score_function(theta_0, X, y, weights)
+    Is = LogisticRegression.information_matrix(theta_0, X, weights)
+    const =  ["const"]
+    return g, Is, const, candidates
+ 
+
+def ordinal_null_model(y , X, candidates):
+
+    df = X
+    ol = OrderLogit(y, df[[]], 'Fisher', 30, theta_initial=[], descending=True)
+    ol.dataprep()
+    ol.loss_function()
+    ol.fit()
     
+    theta_0 =  np.append( ol.theta.copy(),np.zeros(len(candidates)) )
+                         
+    model = OrderLogit(y, X[candidates], 'Fisher', 30, theta_initial=theta_0, descending=True)
+    model.dataprep()
+    g =  model.jacobian()
+    Is = -model.hessian() # For testing this be turned to # -Is
+    model.summary()
+    const = list(model.results_summary.index[:np.unique(model.y).shape[0]-1])
+    cands_temp = model.columns
+    candidates = const + cands_temp
+
+    return g, Is, const, candidates
+
+
+def ols_null_model(y , X, candidates, weights):
+
+    if 'const' not in X.columns.tolist():
+        X.insert(0, "const", 1) 
+    else:
+        X.drop("const", axis=1, inplace=True)
+        X.insert(0, "const", 1)
+
     if "const" not in candidates:
         candidates = ["const"] + candidates
     else:
         candidates.remove("const")
         candidates = ["const"] + candidates
 
+    X = np.asarray(X[candidates])    
+    null_model = np.sum(weights * y) / np.sum(weights)        
+    theta_0 = np.append(null_model,  np.zeros(len(candidates)-1))
+    g = LinearRegression.score_function(theta_0, X, y, weights)
+    Is = - LinearRegression.information_matrix(theta_0, X, weights)
+    const = ['const']
+    return g, Is, const, candidates
+
+
+def prepare_step(X, y, candidates, weights, method=None, rename=False):
+    duplicates = [item for item, count in collections.Counter(candidates).items() if count > 1]
+    candidates = list(dict.fromkeys(candidates))
+    X = X.copy()
+
+    if y.name in X.columns.tolist():
+        X.drop(y.name, axis=1, inplace=True)
+ 
     if duplicates:
         print(f"Duplicates variables are found: {duplicates}, and removed. Variables Remaining: {len(candidates) - 1}")
 
@@ -140,44 +201,57 @@ def prepare_step(X, y, candidates, rename=False):
 
         X.columns = candidates_V
         candidates = candidates_V
+    
 
-    X = np.asarray(X[candidates])
-    avg = np.mean(y)
-    null_model = np.log(avg / (1 - avg))    
-    theta_0 = np.append(null_model, np.zeros(X.shape[1] - 1))
-    g = score(theta_0, X, y)
-   
-    Is = I(theta_0, X)
-
+    if method == "logistic" or method is None:
+        g, Is, const, candidates = logistic_null_model(y, X, candidates, weights)
+    elif method == "ordinal": 
+        g, Is, const, candidates = ordinal_null_model(y, X, candidates)
+    elif method == "ols":   
+        g, Is, const, candidates = ols_null_model(y, X, candidates, weights)
+    
+ 
     scores = []
     variables = []
-    for var in candidates[1:]:
+    for var in candidates[len(const):]:
  
-        model = ['const'] + [var]
+        model = const + [var]
         loc1 = [candidates.index(v) for v in model]
-        score_ = compute_score_submatrix(g, Is, loc1)
+        score_ = compute_score_submatrix(g, Is, loc1)  
         scores.append(score_)   
         variables.append(var)
 
-    ordered_candidates = ['const'] + list(np.array(variables)[np.argsort(scores)[::-1]])
+    ordered_candidates = const + list(np.array(variables)[np.argsort(scores)[::-1]])
                                 
     
    
     return g, Is, X, y, candidates, ordered_candidates
 
 def compute_score_submatrix(g, Is, loc):
+    """
+    Helper to compute -g' * inv(Is_sub) * g using solve for speed/stability.
+    """
     submatrix = Is[np.ix_(loc, loc)]
     subg = g[loc]
+    # Instead of inv(submatrix).dot(subg), do np.linalg.solve(submatrix, subg)
     val = np.linalg.solve(submatrix, subg)
     return -np.dot(subg, val)
 
+
 class Node:
+    count: int = 0
     def __init__(self, key, branches, n, forced_vars=None):
+        """
+        key: the current subset of variables (excluding 'const')
+        branches: how many branches remain
+        n: the target subset size or node parameter
+        forced_vars: list of variables that must stay in every subset
+        """
         if forced_vars is None:
             forced_vars = []
 
-        self.key = key
-        self.key2 = key[:n]
+        self.key = key                # full subset (list of strings)
+        self.key2 = key[:n]           # partial subset for bounding
         self.branch_id = n - branches + 1
         self.n = n
         self.forced_vars = forced_vars
@@ -186,24 +260,59 @@ class Node:
         self.key_list = []
         self.has_branches = branches
 
+        if forced_vars:
+            self.forced_exact  = [var for var in self.forced_vars if "*" not in var]
+            self.forced_star = [var for var in self.forced_vars if "*" in var]
+
     def add_children(self):
+        """
+        Create child nodes by popping one feature at a time
+        but skip if that would drop any forced_var from the subset.
+        """
         visit = self.has_branches - 1
 
         for has_branches_new, _ in enumerate(range(visit, 0, -1)):
+
+
+
             child_branch_id = self.n - has_branches_new - 1
             temp = self.key[:]
 
+            # print(temp, self.key2)
+
+            # Sanity check: child_branch_id might be out of range
             if child_branch_id < 0 or child_branch_id >= len(temp):
                 continue
 
             removed_feat = temp.pop(child_branch_id)
-            if removed_feat in self.forced_vars:
+            # If removing that feature leads to losing forced var, skip
+            # if removed_feat in self.forced_exact:
+            #     continue
+            
+
+            # Also skip if after removal, any forced var is not in temp
+            if not all(fv in temp for fv in self.forced_exact):
+                Node.count += 1 
                 continue
 
-            if not all(fv in temp for fv in self.forced_vars):
-                continue
+            # temp = [ "value1", "value2", "value3", "value4", 'fico_ltv']
+            # forced_star = ['*fico*']
+            # forced_star = ['*v']
+            # any([fnmatch.fnmatch(v , fs)  for v in temp for fs in forced_star])
+             
+             # If removing that feature leads to losing forced var, skip
+            if self.forced_star:
+                if not any([fnmatch.fnmatch(v , fs)  for v in temp for fs in self.forced_star]):
+                    # print(self.forced_star)
+                    Node.count += 1 
+                    continue
+                
 
+            # If we haven't pruned, then child is valid
+            # We also skip if it doesn't actually reduce the subset size
             if len(temp) == self.n - 1:
+                # This line in the original code was used to skip 
+                # same-size sets, but let's keep it for consistency:
                 continue
 
             new_node = Node(
@@ -222,35 +331,52 @@ def traverse_tree_best_first(
     g=np.array([], np.float64), 
     Is=np.array([], np.float64), 
     forced_vars=None, 
-    e={}
+    e={},
+    const=['const']
 ):
     if forced_vars is None:
         forced_vars = []
 
-    C = candidates[1:]
+    const = const
+    # Root node has all variables except 'const'
+    C = candidates[len(const):]
     for fv in forced_vars:
-        if fv not in C:
-            raise ValueError(f"Forced var '{fv}' not found in candidate set!")
+        if not "*" in fv:
+            if fv not in C:
+                raise ValueError(f"Forced var '{fv}' not found in candidate set!")
+    
 
     root = Node(C, branches=n + 1, n=n, forced_vars=forced_vars)
 
-    bound = [0]
+    # Keep track of the best subsets found so far
+    bound = [0]   # This will hold the "worst" among the top-n best scores
     processed_models = []
     processed_scores = []
     count = 0
     bounds = []
 
     def get_score(model_vars):
-        loc1 = [candidates_map.index("const")] + [candidates_map.index(v) for v in model_vars]
+        loc1 = [candidates_map.index(c) for c in const] + [candidates_map.index(v) for v in model_vars]
         return compute_score_submatrix(g, Is, loc1)
 
     def set_bounds(score_val, bound, model_vars):
+        """
+        Insert score_val into our top-n list if it beats the worst 
+        among them. Update 'bound[0]' to the new minimum of the top-n.
+        """
         nonlocal count
+
+        # Also skip if after removal, any forced var is not in temp
+
+
         if count < nbest:
+            # We haven't filled up our "top-n" set
             bounds.append(score_val)
-            bound[0] = min(bounds)
+            bound[0] = min(bounds)  # The worst in top-n
         else:
+            # If this new score is better than the current worst
             if score_val > bound[0]:
+                # Replace the worst
                 idx = bounds.index(bound[0])
                 bounds[idx] = score_val
                 bound[0] = min(bounds)
@@ -258,40 +384,87 @@ def traverse_tree_best_first(
         processed_scores.append(score_val)
         count += 1
 
+    # Priority queue; we store tuples (-score_2, Node)
+    # so the node with largest score_2 is expanded first.
     pq = []
 
-    score_2_root = get_score(root.key2)
+    # Evaluate bounding score for the root
+    score_2_root = get_score(root.key2)  # partial subset bounding
+    # Push into the heap
     heapq.heappush(pq, (-score_2_root, root))
 
+    # We'll prime the system with the partial subset, 
+    # ensuring we set initial bounds
     set_bounds(score_2_root, bound, root.key2)
 
     while pq:
+        # Pop the node with the best bounding (largest score_2)
         neg_score_2, cur_node = heapq.heappop(pq)
         score_2 = -neg_score_2
 
+        # Actual full subset score for bounding check
         score_1 = get_score(cur_node.key)
 
+        # If the bounding for the full set is worse than 
+        # our current worst top-n, prune.
         if score_1 < bound[0]:
-            continue
+            continue  # prune entire branch
 
+        # Otherwise, expand
         cur_node.add_children()
         for child in cur_node.child:
+            # The bounding for the child we use is child's key2, 
+            # same logic as original
             child_score_2 = get_score(child.key2)
+            # Add child's partial subset to our top-n
             set_bounds(child_score_2, bound, child.key2)
+            # Push child into priority queue
             heapq.heappush(pq, (-child_score_2, child))
 
     return processed_models, processed_scores, count
 
+ 
 
 def best_subset_bb_logistic_with_priority(
     df, y, nbest, start=1, stop=1, 
     candidates=None, 
-    forced_vars=None
+    forced_vars=None,
+    weights = None,
+    normalize=False,
+    method = None,
+
 ):
+   
     if forced_vars is None:
         forced_vars = []
 
-    g, Is, X, y, candidates_map, ordered_variables = prepare_step(df, y, candidates)
+    if method is None: 
+        raise ValueError("Method must be specified")
+    else:
+        if method.lower() == "ordinal" and weights is not None:
+            raise ValueError("Weights are not supported for ordinal regression")
+        elif method.lower() == "ols":
+            warnings.warn("OLS method is experimental and not recommended for production use until further testing is completed")
+
+
+
+    if method not in ["logistic", "ordinal", "ols"]:    
+        raise ValueError("Method must be one of 'logistic', 'ordinal', or 'ols'")
+
+    
+    if weights is None:
+        weights = np.ones(len(y))
+    else:
+        if not isinstance(weights, np.ndarray):
+            weights = np.array(weights)
+        if normalize:
+            nobs = df.shape[0]
+            weights = (weights / np.sum(weights)) * nobs
+   
+
+    g, Is, X, y, candidates_map, ordered_variables = prepare_step(df, y, candidates, weights = weights, method=method)
+ 
+    const =  [item for item in ordered_variables if item not in candidates]
 
     if stop > len(candidates_map) - 1:
         stop = len(candidates_map) - 1
@@ -299,15 +472,23 @@ def best_subset_bb_logistic_with_priority(
 
     all_count = 0
     all_models, all_scores, all_varns = [], [], []
+    Node.count = 0  
 
     for n in range(start, stop + 1):
-  
+        
+        # Do not process if n of forced_vars is greater than n
+        if len(forced_vars) > n:
+            # print("Skip", n)
+            print("Finished Var Family:", n, " Skipped")
+            continue
+ 
         models, scores, count = traverse_tree_best_first(
             X, y, n, nbest=nbest,
             candidates_map=candidates_map,
             candidates=ordered_variables,
             g=g, Is=Is,
-            forced_vars=forced_vars
+            forced_vars=forced_vars,            
+            const=const
         )
     
         varn = [n] * len(scores)
@@ -317,6 +498,7 @@ def best_subset_bb_logistic_with_priority(
         all_varns.extend(varn)
 
         print("Finished Var Family:", n)
+ 
 
     scores_top, varN_top, models_top = return_top(
         all_scores, 
@@ -332,4 +514,5 @@ def best_subset_bb_logistic_with_priority(
     }).sort_values(by=["Var Number","Scores"], ascending=[True,False])
 
     e = {}
+    # print(Node.count)
     return result_df, all_count, e
