@@ -213,6 +213,9 @@ class Node:
         if forced_vars:
             self.forced_exact  = [var for var in self.forced_vars if "*" not in var]
             self.forced_star = [var for var in self.forced_vars if "*" in var]
+        else:
+            self.forced_exact = []
+            self.forced_star = []
 
     def add_children(self):
         visit = self.has_branches - 1
