@@ -240,29 +240,21 @@ def compute_score_submatrix(g, Is, loc):
 
 class Node:
     count: int = 0
-    def __init__(self, key, branches, n, forced_vars=None):
+    def __init__(self, key, branches, n):
         """
         key: the current subset of variables (excluding 'const')
         branches: how many branches remain
         n: the target subset size or node parameter
         forced_vars: list of variables that must stay in every subset
         """
-        if forced_vars is None:
-            forced_vars = []
-
         self.key = key                # full subset (list of strings)
         self.key2 = key[:n]           # partial subset for bounding
         self.branch_id = n - branches + 1
         self.n = n
-        self.forced_vars = forced_vars
 
         self.child = []
         self.key_list = []
         self.has_branches = branches
-
-        if forced_vars:
-            self.forced_exact  = [var for var in self.forced_vars if "*" not in var]
-            self.forced_star = [var for var in self.forced_vars if "*" in var]
 
     def add_children(self):
         """
@@ -273,53 +265,22 @@ class Node:
 
         for has_branches_new, _ in enumerate(range(visit, 0, -1)):
 
-
-
             child_branch_id = self.n - has_branches_new - 1
-            temp = self.key[:]
-
-            # print(temp, self.key2)
+            temp = self.key[:]   
 
             # Sanity check: child_branch_id might be out of range
             if child_branch_id < 0 or child_branch_id >= len(temp):
                 continue
 
-            removed_feat = temp.pop(child_branch_id)
-            # If removing that feature leads to losing forced var, skip
-            # if removed_feat in self.forced_exact:
-            #     continue
-            
+            temp.pop(child_branch_id)
 
-            # Also skip if after removal, any forced var is not in temp
-            if not all(fv in temp for fv in self.forced_exact):
-                Node.count += 1 
-                continue
-
-            # temp = [ "value1", "value2", "value3", "value4", 'fico_ltv']
-            # forced_star = ['*fico*']
-            # forced_star = ['*v']
-            # any([fnmatch.fnmatch(v , fs)  for v in temp for fs in forced_star])
-             
-             # If removing that feature leads to losing forced var, skip
-            if self.forced_star:
-                if not any([fnmatch.fnmatch(v , fs)  for v in temp for fs in self.forced_star]):
-                    # print(self.forced_star)
-                    Node.count += 1 
-                    continue
-                
-
-            # If we haven't pruned, then child is valid
-            # We also skip if it doesn't actually reduce the subset size
             if len(temp) == self.n - 1:
-                # This line in the original code was used to skip 
-                # same-size sets, but let's keep it for consistency:
                 continue
 
             new_node = Node(
                 temp, 
                 has_branches_new + 2, 
-                self.n, 
-                forced_vars=self.forced_vars
+                self.n
             )
             self.child.append(new_node)
             self.key_list.append(temp)
@@ -336,6 +297,15 @@ def traverse_tree_best_first(
 ):
     if forced_vars is None:
         forced_vars = []
+    else:
+        forced_vars = forced_vars[:]
+    
+    if forced_vars:
+        exact_matches = set(var for var in forced_vars if "*" not in var)
+        wildcard_matches = [var for var in forced_vars if "*" in var]
+    else:
+        exact_matches = set()
+        wildcard_matches = []
 
     const = const
     # Root node has all variables except 'const'
@@ -346,7 +316,7 @@ def traverse_tree_best_first(
                 raise ValueError(f"Forced var '{fv}' not found in candidate set!")
     
 
-    root = Node(C, branches=n + 1, n=n, forced_vars=forced_vars)
+    root = Node(C, branches=n + 1, n=n)
 
     # Keep track of the best subsets found so far
     bound = [0]   # This will hold the "worst" among the top-n best scores
@@ -365,11 +335,8 @@ def traverse_tree_best_first(
         among them. Update 'bound[0]' to the new minimum of the top-n.
         """
         nonlocal count
-
-        # Also skip if after removal, any forced var is not in temp
-
-
-        if count < nbest:
+   
+        if len(bounds) < nbest:
             # We haven't filled up our "top-n" set
             bounds.append(score_val)
             bound[0] = min(bounds)  # The worst in top-n
@@ -382,8 +349,27 @@ def traverse_tree_best_first(
                 bound[0] = min(bounds)
         processed_models.append(" ".join(model_vars))
         processed_scores.append(score_val)
-        count += 1
 
+
+    def is_key2_subset_forced_vars(model_vars):
+        # Check for exact matches
+        exact_check = exact_matches.issubset(set(model_vars))
+        
+        # Check for wildcard matches
+        wildcard_check = all(any(fnmatch.fnmatch(mv, wc) for mv in model_vars) for wc in wildcard_matches)
+        
+        return exact_check and wildcard_check
+
+    def missing_any_forced_vars(model_vars): 
+
+        missing_exact = exact_matches - set(model_vars)
+        missing_wildcards = [
+            wc for wc in wildcard_matches 
+            if not any(fnmatch.fnmatch(mv, wc) for mv in model_vars) and wc not in model_vars
+        ]
+
+        return list(missing_exact) + missing_wildcards
+   
     # Priority queue; we store tuples (-score_2, Node)
     # so the node with largest score_2 is expanded first.
     pq = []
@@ -393,34 +379,38 @@ def traverse_tree_best_first(
     # Push into the heap
     heapq.heappush(pq, (-score_2_root, root))
 
-    # We'll prime the system with the partial subset, 
-    # ensuring we set initial bounds
-    set_bounds(score_2_root, bound, root.key2)
+
 
     while pq:
         # Pop the node with the best bounding (largest score_2)
         neg_score_2, cur_node = heapq.heappop(pq)
         score_2 = -neg_score_2
-
-        # Actual full subset score for bounding check
         score_1 = get_score(cur_node.key)
+        # print(count+1,  "Key2: ", [str(key) for key in cur_node.key2], "Forced: ",  forced_vars, "Is Subset key2: ", is_key2_subset_forced_vars(cur_node.key2), "Key Missing Forced Features:",  missing_any_forced_vars(cur_node.key))
 
+        if is_key2_subset_forced_vars(cur_node.key2):
+            set_bounds(score_2, bound, cur_node.key2)
+
+        count += 1
         # If the bounding for the full set is worse than 
         # our current worst top-n, prune.
-        if score_1 < bound[0]:
-            continue  # prune entire branch
+        # force the search to continue and expand if bounds is not filled with nbest models
+
+        if len(bounds) >= nbest:
+            if score_1 < bound[0]:
+                continue  # prune entire branch
+        
+        # We are also not expanding if any variable is missing from full model
+        if any(missing_any_forced_vars(cur_node.key)):
+            continue
 
         # Otherwise, expand
         cur_node.add_children()
         for child in cur_node.child:
-            # The bounding for the child we use is child's key2, 
-            # same logic as original
             child_score_2 = get_score(child.key2)
-            # Add child's partial subset to our top-n
-            set_bounds(child_score_2, bound, child.key2)
             # Push child into priority queue
             heapq.heappush(pq, (-child_score_2, child))
-
+    # print("# Models: ", count, end=' ')
     return processed_models, processed_scores, count
 
  
